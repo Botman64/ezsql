@@ -6,8 +6,9 @@ This document explains how to connect to and use the `ezsql` exports from anothe
 
 ## Prerequisites
 
-1. Ensure the `ezsql` resource is running on your server.
-2. Add the following to your `server.cfg`:
+1. Download the `ezsql.zip` from [https://github.com/Botman64/ezsql/releases/latest](Latest Releases)
+2. Ensure the `ezsql` resource is running on your server.
+3. Add the following to your `server.cfg` and replace the credentials in the sql connection string with that of your database:
    ```
    set mysql_connection_string "mysql://user:password@host/database_name?charset=charset"
    ensure ezsql

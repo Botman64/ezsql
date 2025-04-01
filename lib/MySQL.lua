@@ -1,5 +1,3 @@
-local ezsql = exports.ezsql
-
 local function validateQuery(query)
     local blacklist = {
         "DROP DATABASE",
@@ -20,7 +18,6 @@ local function validateQuery(query)
 
     for _, pattern in ipairs(blacklist) do
         if normalizedQuery:match(pattern:lower()) then
-            print("^1Security Warning: Potentially dangerous query detected: " .. query .. "^7")
             TriggerEvent('ezsql:securityAlert', {
                 query = query,
                 pattern = pattern,
@@ -34,6 +31,7 @@ end
 
 local function createFunction(handler)
     local fn = function(query, params, cb)
+
         if type(params) == 'function' then
             cb = params
             params = {}
@@ -42,21 +40,34 @@ local function createFunction(handler)
 
         query = validateQuery(query)
 
+        if cb then
+            CreateThread(function()
+                local result
+                local success, err = pcall(function()
+                    result = exports.ezsql:Query(query, params)
+                end)
+
+                if success then
+                    cb(handler(result))
+                else
+                    print("^1SQL Error: " .. (err or "Unknown error") .. "^7")
+                    cb(nil)
+                end
+            end)
+            return
+        end
+
         local result
         local success, err = pcall(function()
-            result = ezsql:Query(query, params)
+            result = exports.ezsql:Query(query, params)
         end)
 
         if not success then
             print("^1SQL Error: " .. (err or "Unknown error") .. "^7")
-            if cb then cb(nil) end
             return nil
         end
 
-        local processedResult = handler(result)
-
-        if cb then cb(processedResult) end
-        return processedResult
+        return handler(result)
     end
 
     local awaitFn = function(query, params)
@@ -66,7 +77,7 @@ local function createFunction(handler)
 
         local p = promise.new()
         local success, result = pcall(function()
-            return handler(ezsql:Query(query, params))
+            return handler(exports.ezsql:Query(query, params))
         end)
 
         if success then
@@ -95,48 +106,64 @@ MySQL = {
     Async = {}
 }
 
-MySQL.insert = createFunction(function(result)
-    return result and result.insertId or 0
-end)
-
-MySQL.update = createFunction(function(result)
-    return result and result.affectedRows or 0
-end)
-
-MySQL.query = createFunction(function(result)
+local function queryHandler(result)
     return result or {}
-end)
+end
 
-MySQL.scalar = createFunction(function(result)
+local function insertHandler(result)
+    return result and result.insertId or 0
+end
+
+local function updateHandler(result)
+    return result and result.affectedRows or 0
+end
+
+local function scalarHandler(result)
     if result and #result > 0 then
         for k, v in pairs(result[1]) do
             return v
         end
     end
     return nil
-end)
+end
 
-MySQL.single = createFunction(function(result)
+local function singleHandler(result)
     return result and result[1] or nil
-end)
+end
 
-MySQL.execute = createFunction(function(result)
+local function executeHandler(result)
     return result and result.affectedRows or 0
-end)
+end
+
+-- Define all MySQL functions with the handlers
+MySQL.insert = createFunction(insertHandler)
+MySQL.update = createFunction(updateHandler)
+MySQL.query = createFunction(queryHandler)
+MySQL.scalar = createFunction(scalarHandler)
+MySQL.single = createFunction(singleHandler)
+MySQL.execute = createFunction(executeHandler)
+MySQL.rawExecute = createFunction(executeHandler)
 
 MySQL.transaction = setmetatable({
     await = function(queries, params)
         if not params then params = {} end
         local p = promise.new()
 
-        if type(queries) == 'table' then
-            for i, query in ipairs(queries) do
-                queries[i] = validateQuery(query)
-            end
+        -- Validate that queries is an array
+        print(queries)
+        if type(queries) ~= 'table' or #queries == 0 then
+            print("^1SQL Transaction Error: Queries parameter must be a non-empty array.^7")
+            p:reject("Queries parameter must be a non-empty array.")
+            return Citizen.Await(p)
+        end
+
+        for i, query in ipairs(queries) do
+            queries[i] = validateQuery(query)
         end
 
         local success, result = pcall(function()
-            return ezsql:Transaction(queries, params)
+            -- Call Transaction directly as a method with "." instead of ":"
+            return exports.ezsql.Transaction(queries, params)
         end)
 
         if success then
@@ -156,15 +183,19 @@ MySQL.transaction = setmetatable({
         end
         params = params or {}
 
-        if type(queries) == 'table' then
-            for i, query in ipairs(queries) do
-                queries[i] = validateQuery(query)
-            end
+        if type(queries) ~= 'table' or #queries == 0 then
+            print("^1SQL Transaction Error: Queries parameter must be a non-empty array.^7")
+            if cb then cb(false) end
+            return false
+        end
+
+        for i, query in ipairs(queries) do
+            queries[i] = validateQuery(query)
         end
 
         local result
         local success, err = pcall(function()
-            result = ezsql:Transaction(queries, params)
+            result = exports.ezsql.Transaction(queries, params)
         end)
 
         if not success then
@@ -186,7 +217,7 @@ MySQL.prepare = setmetatable({
         query = validateQuery(query)
 
         local success, result = pcall(function()
-            return ezsql:PreparedStatement(query, params)
+            return exports.ezsql.PreparedStatement(query, params)
         end)
 
         if success then
@@ -210,7 +241,7 @@ MySQL.prepare = setmetatable({
 
         local result
         local success, err = pcall(function()
-            result = ezsql:PreparedStatement(query, params)
+            result = exports.ezsql.PreparedStatement(query, params)
         end)
 
         if not success then
@@ -224,8 +255,7 @@ MySQL.prepare = setmetatable({
     end
 })
 
-MySQL.rawExecute = MySQL.execute
-
+-- Legacy Async functions
 MySQL.Async.execute = MySQL.execute
 MySQL.Async.fetchAll = MySQL.query
 MySQL.Async.fetchScalar = MySQL.scalar
@@ -234,31 +264,43 @@ MySQL.Async.insert = MySQL.insert
 MySQL.Async.transaction = MySQL.transaction
 MySQL.Async.prepare = MySQL.prepare
 
-MySQL.Sync.execute = function(query, params)
-    return MySQL.execute(query, params)
+-- Legacy Sync functions
+MySQL.Sync.execute = MySQL.execute
+MySQL.Sync.fetchAll = MySQL.query
+MySQL.Sync.fetchScalar = MySQL.scalar
+MySQL.Sync.fetchSingle = MySQL.single
+MySQL.Sync.insert = MySQL.insert
+
+local exportNames = {'query', 'insert', 'update', 'scalar', 'single', 'execute', 'transaction', 'prepare'}
+local resourceNames = {'oxmysql', 'mysql-async', 'ghmattimysql'}
+for _, exportName in ipairs(exportNames) do
+    for _, resourceName in ipairs(resourceNames) do
+        AddEventHandler('__cfx_export_'.. resourceName ..'_'.. exportName, function(cb)
+            if exportName == 'transaction' and resourceName == ' ghmattimysql' then return end
+            cb(function(query, params, callback)
+                return MySQL[exportName](query, params, callback)
+            end)
+        end)
+    end
 end
 
-MySQL.Sync.fetchAll = function(query, params)
-    return MySQL.query(query, params)
-end
+local ghmattiNames = {
+    ['executeSync'] = 'query',
+    ['sync'] = 'query',
+    ['transaction'] = 'transaction'
+}
 
-MySQL.Sync.fetchScalar = function(query, params)
-    return MySQL.scalar(query, params)
-end
-
-MySQL.Sync.fetchSingle = function(query, params)
-    return MySQL.single(query, params)
-end
-
-MySQL.Sync.insert = function(query, params)
-    return MySQL.insert(query, params)
+for exportName, mappedFunction in pairs(ghmattiNames) do
+    AddEventHandler('__cfx_export_ghmattimysql_'.. exportName, function(cb)
+        cb(function(query, params, callback)
+            return MySQL[mappedFunction](query, params, callback)
+        end)
+    end)
 end
 
 AddEventHandler('onResourceStart', function(resourceName)
-    if resourceName == GetCurrentResourceName() then
-        TriggerEvent('oxmysql:available')
-        print("^2oxmysql bridge^7: MySQL library loaded through ezsql")
-    end
+    if resourceName ~= GetCurrentResourceName() then return end
+    print("^2SQL compatibility bridge^7: MySQL library loaded with oxmysql, mysql-async and ghmattimysql compatibility")
 end)
 
 AddEventHandler('ezsql:securityAlert', function(data)
